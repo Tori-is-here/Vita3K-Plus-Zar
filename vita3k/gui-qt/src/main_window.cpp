@@ -85,8 +85,10 @@
 #include <QCloseEvent>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
@@ -457,6 +459,8 @@ void MainWindow::initialize() {
         this, &MainWindow::on_install_zip_triggered);
     connect(m_ui->install_license_action, &QAction::triggered,
         this, &MainWindow::on_install_license_triggered);
+    connect(m_ui->open_zar_action, &QAction::triggered,
+        this, &MainWindow::on_open_zar_triggered);
 
     connect(m_ui->debug_threads_action, &QAction::triggered, this, [this] { open_debug_widget(DebugWidget::Threads); });
     connect(m_ui->debug_mutexes_action, &QAction::triggered, this, [this] { open_debug_widget(DebugWidget::Mutexes); });
@@ -616,6 +620,70 @@ void MainWindow::on_install_license_triggered() {
     auto *dlg = new LicenseInstallDialog(emuenv, this);
     connect(dlg, &QDialog::finished, dlg, &QObject::deleteLater);
     dlg->exec();
+}
+
+void MainWindow::on_open_zar_triggered() {
+    if (m_game_window) {
+        QMessageBox::information(this, tr("Open Game"), tr("Please stop the running game first (Emulation > Stop)."));
+        return;
+    }
+
+    static QString last_dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+
+    const QString file = QFileDialog::getOpenFileName(this, tr("Open Game (.zar)"), last_dir,
+        tr("PlayStation Vita game archive (*.zar *.ZAR);;All files (*)"));
+    if (file.isEmpty())
+        return;
+    last_dir = QFileInfo(file).absolutePath();
+
+    const fs::path archive_path = gui::utils::to_fs_path(file);
+    if (!is_zar_archive(archive_path)) {
+        QMessageBox::warning(this, tr("Open Game"), tr("Please select a .zar file."));
+        return;
+    }
+
+    // Adding a .zar only writes a small entry (link + sce_sys metadata): the game itself stays in the archive
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const auto reinstall_cb = [this](const std::string &title, const std::string &title_id) {
+        QApplication::restoreOverrideCursor();
+        const auto answer = QMessageBox::question(this, tr("Game Already Installed"),
+            tr("%1 [%2] is already installed.\n\nReplace the installed copy and play it from the .zar file instead?")
+                .arg(QString::fromStdString(title), QString::fromStdString(title_id)));
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        return answer == QMessageBox::Yes;
+    };
+    const std::vector<ContentInfo> contents = install_archive(emuenv, archive_path, nullptr, reinstall_cb);
+    QApplication::restoreOverrideCursor();
+
+    QStringList titles;
+    std::vector<std::string> title_ids;
+    for (const auto &content : contents) {
+        if (!content.state)
+            continue;
+        titles.push_back(QStringLiteral("%1 [%2]").arg(QString::fromStdString(content.title), QString::fromStdString(content.title_id)));
+        title_ids.push_back(content.title_id);
+    }
+
+    if (title_ids.empty()) {
+        QMessageBox::critical(this, tr("Open Game Failed"),
+            tr("Could not open %1.\n\nThe .zar must contain app/<TITLE_ID>/ with the installed (decrypted) game, "
+               "and optionally license/<TITLE_ID>/ with its .rif. See the log for details.")
+                .arg(QFileInfo(file).fileName()));
+        return;
+    }
+
+    on_install_finished();
+
+    size_t index = 0;
+    if (title_ids.size() > 1) {
+        bool ok = false;
+        const QString choice = QInputDialog::getItem(this, tr("Open Game"), tr("This .zar contains several games. Which one do you want to play?"), titles, 0, false, &ok);
+        if (!ok)
+            return;
+        index = static_cast<size_t>(titles.indexOf(choice));
+    }
+
+    boot_game(title_ids[index]);
 }
 
 void MainWindow::on_install_finished() {

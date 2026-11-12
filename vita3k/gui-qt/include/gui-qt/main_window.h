@@ -106,6 +106,7 @@ private slots:
     void on_install_pkg_triggered();
     void on_install_zip_triggered();
     void on_install_license_triggered();
+    void on_open_zar_triggered();
 
     void on_install_finished();
 

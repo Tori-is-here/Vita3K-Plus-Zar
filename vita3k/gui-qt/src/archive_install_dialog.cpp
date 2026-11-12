@@ -420,7 +420,11 @@ void ArchiveInstallDialog::run_install(const std::vector<fs::path> &archives) {
             scroll->setMaximumHeight(320);
             layout()->addWidget(scroll);
 
-            auto *del_check = new QCheckBox(tr("Delete archive files after install?"), this);
+            // .zar games are played straight from the archive, so those files must never be deleted
+            const bool has_deletable_archive = std::any_of(results.begin(), results.end(),
+                [](const ArchiveInstallResult &r) { return !r.archive_full_path.empty() && !is_zar_archive(r.archive_full_path); });
+            auto *del_check = new QCheckBox(tr("Delete archive files after install? (.zar files are kept, games are played from them)"), this);
+            del_check->setVisible(has_deletable_archive);
             layout()->addWidget(del_check);
 
             auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok, this);
@@ -433,7 +437,7 @@ void ArchiveInstallDialog::run_install(const std::vector<fs::path> &archives) {
                         std::set<fs::path> deleted;
                         QStringList failed;
                         for (const auto &r : results) {
-                            if (r.archive_full_path.empty() || !deleted.insert(r.archive_full_path).second)
+                            if (r.archive_full_path.empty() || is_zar_archive(r.archive_full_path) || !deleted.insert(r.archive_full_path).second)
                                 continue;
                             // fs::remove throws and crashes the app when the archive is locked so use the non throwing overload
                             boost::system::error_code error;
