@@ -298,7 +298,9 @@ jobs:
   tagged-release:
     # Pushing a tag such as v1.0.0 publishes a GitHub Release with the Windows, Linux and Android builds
     needs: [desktop-build, android-build]
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Run even if a platform that is not released (macOS, Windows/Linux ARM) failed;
+    # the "Collect release files" step fails if Windows x64, Linux x64 or Android is missing
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
