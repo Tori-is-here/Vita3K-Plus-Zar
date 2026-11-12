@@ -215,7 +215,7 @@ int main(int argc, char *argv[]) {
 
     if (cfg.content_path.has_value()) {
         const auto extension = string_utils::tolower(cfg.content_path->extension().string());
-        const auto is_archive = (extension == ".vpk") || (extension == ".zip");
+        const auto is_archive = (extension == ".vpk") || (extension == ".zip") || (extension == ".zar");
         const auto is_rif = (extension == ".rif") || (cfg.content_path->filename() == "work.bin");
         const auto is_directory = fs::is_directory(*cfg.content_path);
 

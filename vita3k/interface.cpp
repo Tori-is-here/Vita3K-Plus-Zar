@@ -29,8 +29,10 @@
 #include <emuenv/state.h>
 #include <io/functions.h>
 #include <io/vfs.h>
+#include <io/zar_mount.h>
 #include <kernel/state.h>
 #include <lang/state.h>
+#include <packages/license.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
 #include <renderer/state.h>
@@ -38,6 +40,7 @@
 
 #include <miniz.h>
 #include <pugixml.hpp>
+#include <zarchive/zarchivereader.h>
 
 #include <modules/module_parent.h>
 #include <string>
@@ -55,7 +58,9 @@
 
 #include "patch/patch.h"
 
+#include <filesystem>
 #include <memory>
+#include <optional>
 #include <regex>
 
 typedef std::shared_ptr<mz_zip_archive> ZipPtr;
@@ -276,7 +281,269 @@ static std::vector<std::string> get_archive_contents_path(const ZipPtr &zip) {
     return content_path;
 }
 
+// ---------------------------------------------------------------------------
+// .zar (ZArchive) packages, played directly from the archive (see io/zar_mount.h)
+//
+// Expected layout inside the archive (the root may optionally be wrapped in a
+// single top-level folder):
+//   app/<TITLE_ID>/...            the installed game (eboot.bin, sce_sys/param.sfo, ...)
+//   license/<TITLE_ID>/<any>.rif  license of that title (optional)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct ZarDeleter {
+    void operator()(ZArchiveReader *reader) const { delete reader; }
+};
+using ZarPtr = std::unique_ptr<ZArchiveReader, ZarDeleter>;
+
+std::string zar_join(const std::string &base, std::string_view name) {
+    return base.empty() ? std::string(name) : base + "/" + std::string(name);
+}
+
+struct ZarEntry {
+    std::string name;
+    bool is_dir;
+};
+
+std::vector<ZarEntry> zar_list_dir(ZArchiveReader &zar, const std::string &path) {
+    std::vector<ZarEntry> entries;
+    const auto handle = zar.LookUp(path, false, true);
+    if (handle == ZARCHIVE_INVALID_NODE)
+        return entries;
+
+    const uint32_t count = zar.GetDirEntryCount(handle);
+    for (uint32_t i = 0; i < count; i++) {
+        ZArchiveReader::DirEntry entry;
+        if (zar.GetDirEntry(handle, i, entry))
+            entries.push_back({ std::string(entry.name), entry.isDirectory });
+    }
+    return entries;
+}
+
+bool zar_read_file(ZArchiveReader &zar, const std::string &path, vfs::FileBuffer &out) {
+    const auto handle = zar.LookUp(path, true, false);
+    if (handle == ZARCHIVE_INVALID_NODE)
+        return false;
+
+    const uint64_t size = zar.GetFileSize(handle);
+    out.resize(size);
+    return (size == 0) || (zar.ReadFromFile(handle, 0, size, out.data()) == size);
+}
+
+bool zar_extract_file(ZArchiveReader &zar, const std::string &src, const fs::path &dst) {
+    const auto handle = zar.LookUp(src, true, false);
+    if (handle == ZARCHIVE_INVALID_NODE)
+        return false;
+
+    fs::ofstream out(dst, std::ios::out | std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        LOG_ERROR("Failed to create file: {}", dst);
+        return false;
+    }
+
+    std::vector<uint8_t> buffer(1024 * 1024);
+    const uint64_t size = zar.GetFileSize(handle);
+    uint64_t offset = 0;
+    while (offset < size) {
+        const uint64_t read = zar.ReadFromFile(handle, offset, buffer.size(), buffer.data());
+        if (read == 0)
+            break;
+        out.write(reinterpret_cast<const char *>(buffer.data()), static_cast<std::streamsize>(read));
+        offset += read;
+    }
+
+    if (offset != size || !out.good()) {
+        LOG_ERROR("Failed to extract {} from .zar ({} / {} bytes)", src, offset, size);
+        return false;
+    }
+    return true;
+}
+
+// Collects every file below `dir` (archive paths, relative to `dir`).
+void zar_collect_files(ZArchiveReader &zar, const std::string &dir, const std::string &rel, std::vector<std::string> &files, std::vector<std::string> &dirs) {
+    for (const auto &entry : zar_list_dir(zar, zar_join(dir, rel))) {
+        const auto child = zar_join(rel, entry.name);
+        if (entry.is_dir) {
+            dirs.push_back(child);
+            zar_collect_files(zar, dir, child, files, dirs);
+        } else {
+            files.push_back(child);
+        }
+    }
+}
+
+bool zar_is_dir(ZArchiveReader &zar, const std::string &path) {
+    return zar.LookUp(path, false, true) != ZARCHIVE_INVALID_NODE;
+}
+
+// Finds the folder that holds app/ (archive root, or a single wrapping folder).
+std::optional<std::string> zar_find_root(ZArchiveReader &zar) {
+    if (zar_is_dir(zar, "app"))
+        return std::string{};
+
+    const auto root_entries = zar_list_dir(zar, "");
+    for (const auto &entry : root_entries) {
+        if (entry.is_dir && zar_is_dir(zar, zar_join(entry.name, "app")))
+            return entry.name;
+    }
+    return std::nullopt;
+}
+
+// Installs every license/<TITLE_ID>/*.rif into ux0:license/<TITLE_ID>/<CONTENT_ID>.rif
+void zar_install_licenses(EmuEnvState &emuenv, ZArchiveReader &zar, const std::string &root) {
+    const auto license_root = zar_join(root, "license");
+    if (!zar_is_dir(zar, license_root))
+        return;
+
+    fs::create_directories(emuenv.cache_path);
+    const auto temp_rif = emuenv.cache_path / "zar_temp_license.rif";
+
+    for (const auto &title : zar_list_dir(zar, license_root)) {
+        if (!title.is_dir)
+            continue;
+        const auto title_dir = zar_join(license_root, title.name);
+        for (const auto &file : zar_list_dir(zar, title_dir)) {
+            if (file.is_dir || !string_utils::tolower(file.name).ends_with(".rif"))
+                continue;
+            if (!zar_extract_file(zar, zar_join(title_dir, file.name), temp_rif))
+                continue;
+            if (copy_license(emuenv, temp_rif))
+                LOG_INFO("Installed license {} for {}", file.name, title.name);
+            else
+                LOG_WARN("Invalid license {} for {}", file.name, title.name);
+        }
+    }
+
+    boost::system::error_code ec;
+    fs::remove(temp_rif, ec);
+}
+
+// Registers app/<TITLE_ID> of a .zar so that it is played straight from the archive:
+// only the small sce_sys metadata (param.sfo, icons, live area, trophies) is copied to ux0:app/<TITLE_ID>
+// for the app list, together with a link file pointing at the archive. Game data is never extracted.
+bool link_zar_title(EmuEnvState &emuenv, ZArchiveReader &zar, const fs::path &archive_path, const std::string &app_dir, const std::function<void(ArchiveContents)> &progress_callback, const ReinstallCallback &reinstall_callback) {
+    vfs::FileBuffer sfo;
+    if (!zar_read_file(zar, zar_join(app_dir, "sce_sys/param.sfo"), sfo)) {
+        LOG_ERROR("No sce_sys/param.sfo in {} inside .zar, skipping", app_dir);
+        return false;
+    }
+    if (zar.LookUp(zar_join(app_dir, "sce_module/steroid.suprx")) != ZARCHIVE_INVALID_NODE) {
+        LOG_CRITICAL("A Vitamin dump was detected in {}, aborting...", app_dir);
+        return false;
+    }
+
+    sfo::get_param_info(emuenv.app_info, sfo, emuenv.cfg.sys_lang);
+    if (emuenv.app_info.app_title_id.empty()) {
+        LOG_ERROR("Invalid param.sfo (no TITLE_ID) in {} inside .zar, skipping", app_dir);
+        return false;
+    }
+    if (emuenv.app_info.app_category != "gd") {
+        LOG_ERROR("{} in .zar is not a game (category '{}'): only games can be played from a .zar, install patches and DLC normally", app_dir, emuenv.app_info.app_category);
+        return false;
+    }
+    if (zar_is_dir(zar, zar_join(app_dir, "sce_pfs"))) {
+        LOG_ERROR("{} in .zar is still encrypted (sce_pfs found). A .zar must contain the installed (decrypted) game, i.e. the content of ux0/app/{}", app_dir, emuenv.app_info.app_title_id);
+        return false;
+    }
+
+    const auto output_path{ emuenv.vita_fs_path / "ux0/app" / emuenv.app_info.app_title_id };
+    emuenv.app_info.app_title += " (App)";
+
+    if (!fs::create_directories(output_path)) {
+        // A previous link to a .zar is simply refreshed, a real installation is only replaced on request
+        if (!zarfs::is_linked(output_path) && !fs::is_empty(output_path)) {
+            if (reinstall_callback && !reinstall_callback(emuenv.app_info.app_title, emuenv.app_info.app_title_id)) {
+                LOG_INFO("{} already installed, skipping", emuenv.app_info.app_title_id);
+                return true;
+            }
+        }
+        fs::remove_all(output_path);
+        fs::create_directories(output_path);
+    }
+
+    std::vector<std::string> files, dirs;
+    zar_collect_files(zar, zar_join(app_dir, "sce_sys"), "", files, dirs);
+    // The manual can be large and is not needed to list or run the game
+    std::erase_if(files, [](const std::string &file) { return string_utils::tolower(file).starts_with("manual/"); });
+
+    const auto metadata_path = output_path / "sce_sys";
+    for (size_t i = 0; i < files.size(); i++) {
+        if (progress_callback)
+            progress_callback({ {}, {}, { static_cast<float>(i) / files.size() * 100.f } });
+
+        const auto file_output = (metadata_path / fs_utils::utf8_to_path(files[i])).generic_path();
+        fs::create_directories(file_output.parent_path());
+        if (!zar_extract_file(zar, zar_join(zar_join(app_dir, "sce_sys"), files[i]), file_output)) {
+            fs::remove_all(output_path);
+            return false;
+        }
+    }
+
+    if (!zarfs::write_link(output_path, archive_path, app_dir)) {
+        LOG_ERROR("Failed to write .zar link in {}", output_path);
+        fs::remove_all(output_path);
+        return false;
+    }
+
+    if (progress_callback)
+        progress_callback({ {}, {}, { 100.f } });
+
+    LOG_INFO("{} [{}] added, it will be played directly from {}", emuenv.app_info.app_title, emuenv.app_info.app_title_id, archive_path);
+    return true;
+}
+
+std::vector<ContentInfo> install_zar_archive(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback, const ReinstallCallback &reinstall_callback) {
+    ZarPtr zar(ZArchiveReader::OpenFromFile(std::filesystem::path(archive_path.native())));
+    if (!zar) {
+        LOG_CRITICAL("Failed to open .zar archive: {}", fs_utils::path_to_utf8(archive_path));
+        return {};
+    }
+
+    const auto root = zar_find_root(*zar);
+    if (!root) {
+        LOG_CRITICAL("Invalid .zar layout (expected app/<TITLE_ID>/ and license/<TITLE_ID>/): {}", fs_utils::path_to_utf8(archive_path));
+        return {};
+    }
+
+    std::vector<std::string> app_dirs;
+    for (const auto &entry : zar_list_dir(*zar, zar_join(*root, "app"))) {
+        if (entry.is_dir)
+            app_dirs.push_back(zar_join(zar_join(*root, "app"), entry.name));
+    }
+    if (app_dirs.empty()) {
+        LOG_CRITICAL("No titles found under app/ in .zar: {}", fs_utils::path_to_utf8(archive_path));
+        return {};
+    }
+
+    // Licenses are tiny and looked up in ux0:license at boot, so they are copied there.
+    zar_install_licenses(emuenv, *zar, *root);
+
+    const auto count = static_cast<float>(app_dirs.size());
+    float current = 0.f;
+
+    std::vector<ContentInfo> content_installed{};
+    for (const auto &app_dir : app_dirs) {
+        current++;
+        if (progress_callback)
+            progress_callback({ count, current, {} });
+        const bool state = link_zar_title(emuenv, *zar, archive_path, app_dir, progress_callback, reinstall_callback);
+        content_installed.push_back({ emuenv.app_info.app_title, emuenv.app_info.app_title_id, emuenv.app_info.app_category, emuenv.app_info.app_content_id, app_dir, state });
+    }
+
+    return content_installed;
+}
+
+} // namespace
+
+bool is_zar_archive(const fs::path &path) {
+    return string_utils::tolower(fs_utils::path_to_utf8(path.extension())) == ".zar";
+}
+
 std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback, const ReinstallCallback &reinstall_callback) {
+    if (is_zar_archive(archive_path))
+        return install_zar_archive(emuenv, archive_path, progress_callback, reinstall_callback);
+
     FILE *vpk_fp = FOPEN(archive_path.c_str(), "rb");
     if (!vpk_fp) {
         LOG_CRITICAL("Failed to load archive file in path: {}", fs_utils::path_to_utf8(archive_path));
@@ -458,6 +725,11 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
     LOG_INFO("Version: {}", emuenv.app_info.app_version);
     LOG_INFO("Category: {}", emuenv.app_info.app_category);
 
+    // Games added from a .zar are read straight from the archive
+    zarfs::unmount_all();
+    if (!zarfs::mount_from_link(emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path))
+        return FileNotFound;
+
     init_device_paths(emuenv.io);
     init_savedata_app_path(emuenv.io, emuenv.vita_fs_path);
 
@@ -505,7 +777,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         if ((process_preload_disabled & code) == 0) {
             if (is_lle_module(name, emuenv)) {
                 const auto module_name_file = fmt::format("{}.suprx", name);
-                if (load_from_app && fs::exists(module_app_path / module_name_file))
+                if (load_from_app && (fs::exists(module_app_path / module_name_file) || zarfs::exists(module_app_path / module_name_file)))
                     lib_load_list.emplace_back(fmt::format("app0:sce_module/{}", module_name_file));
                 else if (fs::exists(emuenv.vita_fs_path / "vs0/sys/external" / module_name_file))
                     lib_load_list.emplace_back(fmt::format("vs0:sys/external/{}", module_name_file));

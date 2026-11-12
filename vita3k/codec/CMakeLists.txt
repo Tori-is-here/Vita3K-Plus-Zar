@@ -14,4 +14,4 @@ add_library(
 )
 
 target_include_directories(codec PUBLIC include)
-target_link_libraries(codec PRIVATE ffmpeg libatrac9 util) 
+target_link_libraries(codec PRIVATE ffmpeg io libatrac9 util) 

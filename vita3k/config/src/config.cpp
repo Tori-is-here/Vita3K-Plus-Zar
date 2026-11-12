@@ -338,7 +338,7 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths)
         ->group("Options");
 
     // Positional options
-    app.add_option("content-path", command_line.content_path, "Path to the app with a .vpk/.zip extension or folder of content to install & run")
+    app.add_option("content-path", command_line.content_path, "Path to the app with a .vpk/.zip/.zar extension or folder of content to install & run")
         ->default_str({});
 
     // Grouped options

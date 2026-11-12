@@ -638,7 +638,7 @@ void MainWindow::dragEnterEvent(QDragEnterEvent *event) {
             const QString path = url.toLocalFile();
             const QString ext = QFileInfo(path).suffix().toLower();
             if (ext == QStringLiteral("pup") || ext == QStringLiteral("vpk")
-                || ext == QStringLiteral("zip") || ext == QStringLiteral("pkg")
+                || ext == QStringLiteral("zip") || ext == QStringLiteral("zar") || ext == QStringLiteral("pkg")
                 || ext == QStringLiteral("bin") || ext == QStringLiteral("rif") || path.endsWith(QStringLiteral("work.bin"))
                 || QFileInfo(path).isDir() || path.endsWith(QStringLiteral("theme.xml"))) {
                 event->acceptProposedAction();
@@ -689,7 +689,7 @@ void MainWindow::dropEvent(QDropEvent *event) {
             continue;
 
         const std::string ext = string_utils::tolower(drop_paths[i].extension().string());
-        if (ext == ".vpk" || ext == ".zip") {
+        if (ext == ".vpk" || ext == ".zip" || ext == ".zar") {
             archive_paths.push_back(drop_paths[i]);
             handled[i] = true;
         }
@@ -720,7 +720,7 @@ void MainWindow::handle_drop(const QString &path) {
         connect(dlg, &QDialog::finished, dlg, &QObject::deleteLater);
         dlg->exec();
 
-    } else if (ext == ".vpk" || ext == ".zip") {
+    } else if (ext == ".vpk" || ext == ".zip" || ext == ".zar") {
         auto *dlg = new ArchiveInstallDialog(emuenv, { drop_path }, this);
         connect(dlg, &ArchiveInstallDialog::install_complete,
             this, [this](const QList<ArchiveInstallResult> &) { on_install_finished(); });

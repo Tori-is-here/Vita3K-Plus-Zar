@@ -39,7 +39,7 @@ static const uint32_t page_size = []() -> uint32_t {
 }();
 
 SceOff FileStats::read(void *input_data, const int element_size, const SceSize element_count) const {
-    if (!wrapped_file)
+    if (!wrapped_file && !zar_file)
         return -1;
 
     if (element_size == 0 || element_count == 0)
@@ -54,6 +54,9 @@ SceOff FileStats::read(void *input_data, const int element_size, const SceSize e
         input_addr[i] = 0;
     input_addr[element_size * element_count - 1] = 0;
 
+    if (zar_file)
+        return static_cast<SceOff>(zar_file->read(input_data, static_cast<uint64_t>(element_size) * element_count) / element_size);
+
     return fread(input_data, element_size, element_count, wrapped_file.get());
 }
 
@@ -65,6 +68,9 @@ SceOff FileStats::write(const void *data, const SceSize size, const int count) c
 }
 
 int FileStats::truncate(const SceSize size) const {
+    if (!wrapped_file)
+        return -1;
+
 #ifdef _WIN32
     return _chsize_s(_fileno(get_file_pointer()), size);
 #else
@@ -73,7 +79,7 @@ int FileStats::truncate(const SceSize size) const {
 }
 
 bool FileStats::seek(const SceOff offset, const SceIoSeekMode seek_mode) const {
-    if (!wrapped_file)
+    if (!wrapped_file && !zar_file)
         return false;
 
     auto base = SEEK_SET;
@@ -91,6 +97,9 @@ bool FileStats::seek(const SceOff offset, const SceIoSeekMode seek_mode) const {
         return false;
     }
 
+    if (zar_file)
+        return zar_file->seek(offset, base);
+
 #ifdef _WIN32
     return _fseeki64(wrapped_file.get(), offset, base) == 0;
 #else
@@ -99,6 +108,9 @@ bool FileStats::seek(const SceOff offset, const SceIoSeekMode seek_mode) const {
 }
 
 SceOff FileStats::tell() const {
+    if (zar_file)
+        return static_cast<SceOff>(zar_file->tell());
+
     if (!wrapped_file)
         return -1;
 

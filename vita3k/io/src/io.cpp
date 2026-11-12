@@ -22,6 +22,7 @@
 #include <io/types.h>
 #include <io/util.h>
 #include <io/vfs.h>
+#include <io/zar_mount.h>
 
 #include <rtc/rtc.h>
 #include <util/log.h>
@@ -36,6 +37,7 @@
 #include <unistd.h>
 #endif
 
+#include <algorithm>
 #include <cassert>
 #include <iostream>
 #include <iterator>
@@ -66,7 +68,11 @@ namespace vfs {
 
 bool read_file(const VitaIoDevice device, FileBuffer &buf, const fs::path &vita_fs_path, const fs::path &vfs_file_path) {
     const auto host_file_path = device::construct_emulated_path(device, vfs_file_path, vita_fs_path).generic_path();
-    return fs_utils::read_data(host_file_path, buf);
+    if (fs_utils::read_data(host_file_path, buf))
+        return true;
+
+    // Not on the host: the file may live inside a mounted .zar archive
+    return zarfs::read_all(host_file_path, buf);
 }
 
 bool read_app_file(FileBuffer &buf, const fs::path &vita_fs_path, const std::string &app_path, const fs::path &vfs_file_path) {
@@ -77,6 +83,9 @@ SceSize get_directory_used_size(const VitaIoDevice device, const std::string &vf
     const auto emuenv_path = device::construct_emulated_path(device, vfs_path, vita_fs_path);
 
     SceSize total_size = 0;
+    if (!fs::exists(emuenv_path))
+        return total_size;
+
     for (const auto &entry : fs::recursive_directory_iterator(emuenv_path)) {
         if (fs::is_regular_file(entry.path()))
             total_size += fs::file_size(entry.path());
@@ -90,6 +99,9 @@ SceSize get_directory_used_size(const VitaIoDevice device, const std::string &vf
 // ****************************
 // * End utility functions *
 // ****************************
+
+// Fills statp for a file or directory that lives inside a mounted .zar archive
+static void stat_zar_node(const zarfs::Node &node, SceIoStat *statp);
 
 static bool is_valid_output_path(const VitaIoDevice device) {
     return !(device == VitaIoDevice::savedata0 || device == VitaIoDevice::savedata1 || device == VitaIoDevice::app0
@@ -148,6 +160,7 @@ void io_deinit(IOState &io) {
     io.app_path.clear();
 
     io.cachemap.clear();
+    zarfs::unmount_all();
 
     {
         std::lock_guard<std::mutex> lock(io.overlay_mutex);
@@ -345,6 +358,29 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
+    // Files that are not on the host may live inside a mounted .zar archive (read-only)
+    if (!fs::exists(system_path)) {
+        if (const auto zar_node = zarfs::lookup(system_path)) {
+            if (zar_node->is_dir) {
+                LOG_ERROR("Cannot open directory: {}", system_path);
+                return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+            }
+            if (flags & (SCE_O_CREAT | SCE_O_TRUNC | SCE_O_APPEND)) {
+                LOG_ERROR("Cannot open {} for writing, it is inside a read-only .zar archive", path);
+                return IO_ERROR(SCE_ERROR_ERRNO_EACCES);
+            }
+            LOG_WARN_IF(flags & SCE_O_WRONLY, "{} is inside a read-only .zar archive, opening it read-only", path);
+
+            const auto normalized_path = device::construct_normalized_path(device, translated_path);
+            FileStats f{ path, normalized_path, system_path, flags, std::make_shared<zarfs::File>(*zar_node) };
+            const auto fd = io.next_fd++;
+            io.std_files.emplace(fd, f);
+
+            LOG_TRACE_IF(log_file_op, "{}: Opening file {} ({}) from .zar, fd: {}", export_name, path, normalized_path, log_hex(fd));
+            return fd;
+        }
+    }
+
     // Do not allow any new files if they do not have a write flag.
     if (!fs::exists(system_path)) {
         if (!(flags & SCE_O_CREAT)) {
@@ -526,6 +562,14 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
         file_path = device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio);
 
         if (!fs::exists(file_path)) {
+            if (const auto zar_node = zarfs::lookup(file_path)) {
+                LOG_TRACE_IF(log_file_op && log_file_stat, "{}: Statting file: {} ({}) from .zar", export_name, file, device::construct_normalized_path(device, translated_path));
+                stat_zar_node(*zar_node, statp);
+                return 0;
+            }
+        }
+
+        if (!fs::exists(file_path)) {
             if (io.case_isens_find_enabled) {
                 // Attempt a case-insensitive file search.
                 const auto original_file_path = file_path;
@@ -556,6 +600,14 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
 
         file_path = fd_file->second.get_system_location();
         LOG_TRACE_IF(log_file_op && log_file_stat, "{}: Statting fd: {}", export_name, log_hex(fd));
+
+        if (fd_file->second.is_zar_file()) {
+            if (const auto zar_node = zarfs::lookup(file_path)) {
+                stat_zar_node(*zar_node, statp);
+                return 0;
+            }
+            return IO_ERROR_UNK();
+        }
 
         statp->st_attr = fd_file->second.get_file_mode();
     }
@@ -602,6 +654,24 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
     __RtcTicksToPspTime(&statp->st_ctime, creation_time_ticks);
 
     return 0;
+}
+
+// Fills statp for a file or directory that lives inside a mounted .zar archive
+static void stat_zar_node(const zarfs::Node &node, SceIoStat *statp) {
+    statp->st_mode = SCE_S_IRUSR | SCE_S_IRGRP | SCE_S_IROTH;
+    if (node.is_dir) {
+        statp->st_attr = SCE_SO_IFDIR;
+        statp->st_mode |= SCE_S_IFDIR | SCE_S_IXUSR | SCE_S_IXGRP | SCE_S_IXOTH;
+    } else {
+        statp->st_size = node.size;
+        statp->st_attr = SCE_SO_IFREG;
+        statp->st_mode |= SCE_S_IFREG;
+    }
+
+    const std::uint64_t ticks = RTC_OFFSET + static_cast<std::uint64_t>(node.mtime) * VITA_CLOCKS_PER_SEC;
+    __RtcTicksToPspTime(&statp->st_atime, ticks);
+    __RtcTicksToPspTime(&statp->st_mtime, ticks);
+    __RtcTicksToPspTime(&statp->st_ctime, ticks);
 }
 
 int stat_file_by_fd(IOState &io, const SceUID fd, SceIoStat *statp, const fs::path &vita_fs_path, const char *export_name) {
@@ -707,6 +777,34 @@ SceUID open_dir(IOState &io, const char *path, const fs::path &vita_fs_path, con
     const auto translated_path = translate_path(path, device, io.device_paths);
 
     auto dir_path = device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio) / "";
+
+    // Directory inside a mounted .zar archive: list the archive entries plus any host entries
+    std::vector<zarfs::DirEntry> zar_entries;
+    if (zarfs::list_dir(dir_path, zar_entries)) {
+        std::vector<std::string> names;
+        boost::system::error_code ec;
+        if (fs::is_directory(dir_path, ec)) {
+            for (const auto &entry : fs::directory_iterator(dir_path, ec)) {
+                const auto name = fs_utils::path_to_utf8(entry.path().filename());
+                if (name != zarfs::LINK_FILE_NAME)
+                    names.push_back(name);
+            }
+        }
+        for (const auto &entry : zar_entries) {
+            const auto same_name = [&](const std::string &name) { return string_utils::tolower(name) == string_utils::tolower(entry.name); };
+            if (std::none_of(names.begin(), names.end(), same_name))
+                names.push_back(entry.name);
+        }
+
+        const auto normalized = device::construct_normalized_path(device, translated_path);
+        const DirStats d{ path, normalized, dir_path, std::move(names) };
+        const auto fd = io.next_fd++;
+        io.dir_entries.emplace(fd, d);
+
+        LOG_TRACE_IF(log_file_op, "{}: Opening dir {} ({}) from .zar, fd: {}", export_name, path, normalized, log_hex(fd));
+        return fd;
+    }
+
     if (!fs::exists(dir_path)) {
         if (io.case_isens_find_enabled) {
             // Attempt a case-insensitive file search.
@@ -758,6 +856,20 @@ SceUID read_dir(IOState &io, const SceUID fd, SceIoDirent *dent, const fs::path 
         // Refuse any fd that is not explicitly a directory
         if (!dir->second.is_directory())
             return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+        if (dir->second.is_virtual()) {
+            std::string name;
+            if (!dir->second.next_virtual_entry(name))
+                return 0;
+
+            strncpy(dent->d_name, name.c_str(), sizeof(dent->d_name) - 1);
+            const auto file_path = std::string(dir->second.get_vita_loc()) + '/' + name;
+
+            LOG_TRACE_IF(log_file_op, "{}: Reading entry {} of fd: {}", export_name, file_path, log_hex(fd));
+            if (stat_file(io, file_path.c_str(), &dent->d_stat, vita_fs_path, export_name) < 0)
+                return IO_ERROR(SCE_ERROR_ERRNO_EMFILE);
+            return 1; // move to the next file
+        }
 
         const auto d = dir->second.get_dir_ptr();
         if (!d)

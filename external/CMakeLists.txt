@@ -83,6 +83,22 @@ add_subdirectory(libfat16)
 add_library(miniz STATIC miniz/miniz.c miniz/miniz.h)
 target_include_directories(miniz PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/miniz")
 
+# zstd (decompression only, used by the ZArchive reader for .zar packages)
+file(GLOB ZSTD_DECOMPRESS_SOURCES
+	"${CMAKE_CURRENT_SOURCE_DIR}/zstd/lib/common/*.c"
+	"${CMAKE_CURRENT_SOURCE_DIR}/zstd/lib/decompress/*.c")
+add_library(zstd_decompress STATIC ${ZSTD_DECOMPRESS_SOURCES})
+target_include_directories(zstd_decompress PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/zstd/lib")
+target_compile_definitions(zstd_decompress PRIVATE ZSTD_DISABLE_ASM=1 ZSTD_LEGACY_SUPPORT=0)
+
+# ZArchive reader (.zar packages) - https://github.com/Exzap/ZArchive
+add_library(zarchive STATIC zarchive/src/zarchivereader.cpp)
+target_include_directories(zarchive PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/zarchive/include")
+target_compile_features(zarchive PUBLIC cxx_std_20)
+# Games are played straight from the archive: keep more decompressed 64KiB blocks around than the 4MiB default
+target_compile_definitions(zarchive PRIVATE ZARCHIVE_READER_CACHE_SIZE=33554432)
+target_link_libraries(zarchive PRIVATE zstd_decompress)
+
 add_subdirectory(sdl)
 
 # Cubeb setup, from https://github.com/RPCS3/rpcs3/blob/master/3rdparty/cubeb/CMakeLists.txt

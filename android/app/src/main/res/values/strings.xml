@@ -242,8 +242,8 @@
     <string name="install_firmware_desc">Install PS Vita firmware</string>
     <string name="install_pkg_title">Package (PKG)</string>
     <string name="install_pkg_desc">Install a .pkg app or DLC</string>
-    <string name="install_archive_title">Archive (ZIP/VPK)</string>
-    <string name="install_archive_desc">Install from .zip or .vpk file</string>
+    <string name="install_archive_title">Archive (ZIP/VPK/ZAR)</string>
+    <string name="install_archive_desc">Install from .zip, .vpk or .zar file</string>
     <string name="install_license_title">License</string>
     <string name="install_license_desc">Install a .rif or .bin license file</string>
     <string name="install_progress_title">Installing</string>
@@ -253,7 +253,7 @@
     <string name="install_notification_channel_name">Install progress</string>
     <string name="install_notification_channel_desc">Keeps content installs running while Vita3K is backgrounded.</string>
     <string name="install_archive_source_title">Install Archive</string>
-    <string name="install_archive_source_message">Choose a single archive file or a folder containing multiple .zip and .vpk archives.</string>
+    <string name="install_archive_source_message">Choose a single archive file or a folder containing multiple .zip, .vpk and .zar archives.</string>
     <string name="install_archive_source_file">Select archive file</string>
     <string name="install_archive_source_folder">Select archive folder</string>
     <string name="install_license_source_title">Install License</string>
@@ -290,7 +290,7 @@
     <string name="install_success_license">License installed successfully.</string>
     <string name="install_failed_license">License installation failed.</string>
     <string name="install_failed_license_zrif">Failed to create license from zRIF key.</string>
-    <string name="install_error_archive_folder_empty">The selected folder contains no .zip or .vpk archives.</string>
+    <string name="install_error_archive_folder_empty">The selected folder contains no .zip, .vpk or .zar archives.</string>
     <string name="install_error_read_license">Failed to read license file.</string>
     <string name="install_error_pkg_path_lost">Internal error: PKG path lost.</string>
     <string name="install_error_generic">Error: %1$s</string>

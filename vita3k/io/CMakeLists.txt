@@ -10,11 +10,14 @@ add_library(
 	include/io/util.h
 	include/io/vfs.h
 	include/io/VitaIoDevice.h
+	include/io/zar_mount.h
 	src/device.cpp
 	src/filesystem.cpp
 	src/io.cpp
 	src/state_functions.cpp
+	src/zar_mount.cpp
 )
 
 target_include_directories(io PUBLIC include)
 target_link_libraries(io PUBLIC dirent rtc util)
+target_link_libraries(io PRIVATE zarchive)

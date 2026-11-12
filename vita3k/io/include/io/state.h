@@ -20,14 +20,20 @@
 #include <io/filesystem.h>
 #include <io/types.h>
 #include <io/util.h>
+#include <io/zar_mount.h>
 
 #include <map>
+#include <memory>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 // Class for all needed information to access files on Vita3K.
 class FileStats : public VitaStats {
     // Shared file pointer
     FilePtr wrapped_file;
+    // Set instead of wrapped_file when the file lives inside a mounted .zar archive (read-only)
+    std::shared_ptr<zarfs::File> zar_file;
 
 public:
     // Constructor used for files
@@ -43,13 +49,33 @@ public:
         file_info.access_mode = SCE_S_IFREG;
     }
 
+    // Constructor used for files inside a mounted .zar archive
+    explicit FileStats(const char *vita, const std::string &t, const fs::path &file, const int open, std::shared_ptr<zarfs::File> zar) {
+        zar_file = std::move(zar);
+
+        file_info.vita_loc = vita;
+        file_info.translated = t;
+        file_info.sys_loc = file;
+        file_info.open_mode = open;
+        file_info.file_mode = SCE_SO_IFREG | SCE_SO_IROTH;
+        file_info.access_mode = SCE_S_IFREG;
+    }
+
     bool is_regular_file() const {
         return file_info.file_mode & SCE_SO_IFREG;
     }
 
+    bool is_zar_file() const {
+        return static_cast<bool>(zar_file);
+    }
+
+    SceOff get_zar_size() const {
+        return zar_file ? static_cast<SceOff>(zar_file->size()) : 0;
+    }
+
     // Check if the file is writable
     bool can_write_file() const {
-        if (!is_regular_file())
+        if (!is_regular_file() || zar_file)
             return false;
 
         return can_write(file_info.open_mode);
@@ -72,6 +98,9 @@ public:
 class DirStats : public VitaStats {
     // Shared directory pointer
     DirPtr dir_ptr;
+    // Entry names of a directory backed (fully or partly) by a mounted .zar archive
+    std::shared_ptr<std::vector<std::string>> virtual_entries;
+    std::shared_ptr<size_t> virtual_index;
 
 public:
     DirStats(const char *vita, const std::string &t, const fs::path &file, DirPtr ptr) {
@@ -85,8 +114,32 @@ public:
         file_info.access_mode = SCE_S_IFDIR | SCE_S_IRUSR;
     }
 
+    DirStats(const char *vita, const std::string &t, const fs::path &file, std::vector<std::string> entries) {
+        virtual_entries = std::make_shared<std::vector<std::string>>(std::move(entries));
+        virtual_index = std::make_shared<size_t>(0);
+
+        file_info.vita_loc = vita;
+        file_info.translated = t;
+        file_info.sys_loc = file;
+        file_info.open_mode = SCE_O_RDONLY;
+        file_info.file_mode = SCE_SO_IFDIR | SCE_SO_IROTH;
+        file_info.access_mode = SCE_S_IFDIR | SCE_S_IRUSR;
+    }
+
     auto get_dir_ptr() const {
         return get_system_dir_ptr(dir_ptr);
+    }
+
+    bool is_virtual() const {
+        return static_cast<bool>(virtual_entries);
+    }
+
+    // Next entry name of a virtual directory, false once the end is reached
+    bool next_virtual_entry(std::string &name) const {
+        if (!virtual_entries || *virtual_index >= virtual_entries->size())
+            return false;
+        name = (*virtual_entries)[(*virtual_index)++];
+        return true;
     }
 
     bool is_directory() const {

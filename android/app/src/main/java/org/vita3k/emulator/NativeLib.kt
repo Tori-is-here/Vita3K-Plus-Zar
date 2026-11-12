@@ -54,7 +54,7 @@ object NativeLib {
     /** Installs a .pkg file. Pass zrif="" to skip license. */
     external fun installPkg(path: String, zrif: String, callback: InstallCallback): Boolean
     /**
-     * Installs a .zip or .vpk archive.
+     * Installs a .zip, .vpk or .zar archive.
      * @param forceReinstall If true, silently reinstalls if already present (no prompt).
      */
     external fun installArchive(path: String, callback: InstallCallback, forceReinstall: Boolean): Boolean

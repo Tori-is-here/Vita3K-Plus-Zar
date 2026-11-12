@@ -2,6 +2,31 @@
 
 Experimental fork to test .zar game support.
 
+## Playing .zar games
+
+`.zar` / `.ZAR` files ([ZArchive](https://github.com/Exzap/ZArchive), zstd-compressed) are **played directly from the archive**: the game is never extracted.
+Add a `.zar` the same way as a `.vpk`/`.zip` (the *Install archive* dialog, drag & drop onto the main window, the Android installer) or run it from the command line (`Vita3K game.zar`).
+
+The archive must contain the *installed* (decrypted) game, i.e. what Vita3K has in `ux0/app/<TITLE_ID>` after a normal install. Pack a folder with this layout using the `zarchive` tool (`zarchive <folder> <game>.zar`):
+
+```
+psvita_game_example/
+├── app/
+│   └── <TITLE_ID>/          all game files (eboot.bin, sce_sys/, ...)
+└── license/
+    └── <TITLE_ID>/
+        └── <any name>.rif   license of the game
+```
+
+How it works:
+
+- Adding a `.zar` only creates a small entry in `ux0/app/<TITLE_ID>/`: a `zar_link.txt` pointing at the archive and a copy of `sce_sys` (icon, live area, trophies; a few MB, the manual is skipped) so the game shows up in the list. The `.rif` is copied to `ux0/license/<TITLE_ID>/`.
+- When the game starts, the archive is mounted read-only as `app0:` / `ux0:app/<TITLE_ID>` and every file is read and decompressed on the fly.
+- Files that exist in `ux0/app/<TITLE_ID>/` take precedence over the archive, so mods can still be dropped there. Save data, DLC and patches live outside the archive as usual.
+- Keep the `.zar` where it is: if it is moved or deleted, add it again. Deleting the game from the list only removes the small entry, never the `.zar`.
+- Several titles may be placed under `app/` in one archive, and the archive may be made from that folder or from its parent.
+- Still-encrypted dumps (with `sce_pfs`) cannot be played from a `.zar`; install them normally first, then pack `ux0/app/<TITLE_ID>`.
+
 # Vita3K+
 
 A fork of Vita3K with additional game compatibility and rendering fixes. All credit for the emulator itself belongs to the Vita3K team.

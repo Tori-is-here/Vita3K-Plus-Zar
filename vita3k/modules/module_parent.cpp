@@ -26,6 +26,7 @@
 #include <io/device.h>
 #include <io/state.h>
 #include <io/vfs.h>
+#include <io/zar_mount.h>
 #include <kernel/load_self.h>
 #include <kernel/state.h>
 #include <module/load_module.h>
@@ -264,7 +265,7 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
         }
     }
 
-    if (emuenv.io.case_isens_find_enabled && !fs::exists(system_path)) {
+    if (emuenv.io.case_isens_find_enabled && !fs::exists(system_path) && !zarfs::exists(system_path)) {
         // Attempt a case-insensitive file search.
         const auto original_translated_module_path = translated_module_path;
         const auto cached_path = find_in_cache(emuenv.io, string_utils::tolower(translated_module_path.string()));

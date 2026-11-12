@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -26,6 +27,7 @@ struct AVFrame;
 struct AVPacket;
 struct AVCodecContext;
 struct AVFormatContext;
+struct AVIOContext;
 struct AVCodecParserContext;
 struct AVCodec;
 struct SwrContext;
@@ -253,6 +255,10 @@ struct PlayerState {
     AVCodecContext *audio_context{};
     int32_t video_stream_id = -1;
     int32_t audio_stream_id = -1;
+
+    // Set when the playing video is read straight from a mounted .zar archive
+    AVIOContext *archive_io{};
+    std::shared_ptr<void> archive_file;
 
     std::queue<AVPacket *> audio_packets;
     std::queue<AVPacket *> video_packets;

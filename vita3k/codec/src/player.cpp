@@ -17,6 +17,7 @@
 
 #include <codec/state.h>
 
+#include <io/zar_mount.h>
 #include <util/fs.h>
 #include <util/log.h>
 
@@ -54,6 +55,12 @@ void PlayerState::free_video() {
     if (format)
         avformat_close_input(&format);
 
+    if (archive_io) {
+        av_freep(&archive_io->buffer);
+        avio_context_free(&archive_io);
+    }
+    archive_file.reset();
+
     while (!video_packets.empty()) {
         AVPacket *packet = video_packets.front();
         av_packet_free(&packet);
@@ -69,9 +76,34 @@ void PlayerState::free_video() {
     video_playing.clear();
 }
 
+static int archive_read(void *opaque, uint8_t *buf, int buf_size) {
+    const auto read = static_cast<zarfs::File *>(opaque)->read(buf, static_cast<uint64_t>(buf_size));
+    return read ? static_cast<int>(read) : AVERROR_EOF;
+}
+
+static int64_t archive_seek(void *opaque, int64_t offset, int whence) {
+    auto *file = static_cast<zarfs::File *>(opaque);
+    if (whence & AVSEEK_SIZE)
+        return static_cast<int64_t>(file->size());
+    if (!file->seek(offset, whence & ~AVSEEK_FORCE))
+        return AVERROR(EINVAL);
+    return static_cast<int64_t>(file->tell());
+}
+
 void PlayerState::switch_video(const std::string &path) {
     free_video();
     video_playing = path;
+
+    if (!fs::exists(path)) {
+        // The video is inside a mounted .zar archive: let FFmpeg read it through the archive
+        if (const auto file = zarfs::open(fs_utils::utf8_to_path(path))) {
+            constexpr int io_buffer_size = 64 * 1024;
+            archive_file = file;
+            archive_io = avio_alloc_context(static_cast<unsigned char *>(av_malloc(io_buffer_size)), io_buffer_size, 0, file.get(), &archive_read, nullptr, &archive_seek);
+            format = avformat_alloc_context();
+            format->pb = archive_io;
+        }
+    }
 
     int error = avformat_open_input(&format, path.c_str(), nullptr, nullptr);
     assert(error == 0);
@@ -230,7 +262,7 @@ std::vector<uint8_t> PlayerState::receive_video() {
 }
 
 void PlayerState::queue(const std::string &path) {
-    if (fs::exists(path)) {
+    if (fs::exists(path) || zarfs::is_file(fs_utils::utf8_to_path(path))) {
         LOG_INFO("Queued video: '{}'.", path);
         if (video_playing.empty())
             switch_video(path);

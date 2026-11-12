@@ -57,7 +57,7 @@ private const val ARG_TITLE_ID = "titleId"
 private const val ARG_APP_NAME = "appName"
 private val FIRMWARE_EXTENSIONS = setOf(".pup")
 private val PKG_EXTENSIONS = setOf(".pkg")
-private val ARCHIVE_EXTENSIONS = setOf(".zip", ".vpk")
+private val ARCHIVE_EXTENSIONS = setOf(".zip", ".vpk", ".zar")
 private val LICENSE_EXTENSIONS = setOf(".bin", ".rif")
 
 private fun customConfigRoute(titleId: String, appName: String): String {
