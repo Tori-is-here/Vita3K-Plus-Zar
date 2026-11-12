@@ -1,3 +1,7 @@
+# Vita3k-Plus-Zar
+
+Experimental fork to test .zar game support.
+
 # Vita3K+
 
 A fork of Vita3K with additional game compatibility and rendering fixes. All credit for the emulator itself belongs to the Vita3K team.
