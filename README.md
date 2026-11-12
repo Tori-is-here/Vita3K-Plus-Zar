@@ -1,5 +1,6 @@
 # Vita3k-Plus-Zar
 
+** This fork makes use of AI (Opus 5.5) **
 Experimental fork to test .zar game support.
 
 ## Playing .zar games
