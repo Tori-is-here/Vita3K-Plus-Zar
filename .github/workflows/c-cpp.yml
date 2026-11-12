@@ -22,8 +22,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            runs_on: ubuntu-latest
+          # Pinned: ubuntu-latest is now 26.04, which the libboost PPA in .ci/setup-linux.sh does not support
+          - os: ubuntu-24.04
+            runs_on: ubuntu-24.04
             platform: linux-x64
             arch: x86_64
             cmake_preset: ci-linux-clang-appimage
