@@ -294,6 +294,52 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
           path: ${{ env.ARTIFACT_DIR }}
 
+  tagged-release:
+    # Pushing a tag such as v1.0.0 publishes a GitHub Release with the Windows, Linux and Android builds
+    needs: [desktop-build, android-build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: downloaded
+
+      - name: Collect release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          mkdir -p release
+          for dir in downloaded/vita3k-*; do
+            name="$(basename "$dir")"
+            case "$name" in
+              *-windows-x64)
+                (cd "$dir/bin" && zip -qr "$GITHUB_WORKSPACE/release/Vita3K-Plus-Zar-${tag}-windows-x64.zip" .)
+                ;;
+              *-linux-x64)
+                appimage="$(find "$dir" -maxdepth 1 -name '*.AppImage' | head -n 1)"
+                cp "$appimage" "release/Vita3K-Plus-Zar-${tag}-linux-x86_64.AppImage"
+                ;;
+              *-android)
+                cp "$dir/app.apk" "release/Vita3K-Plus-Zar-${tag}-android.apk"
+                ;;
+            esac
+          done
+          ls -al release
+          for f in windows-x64.zip linux-x86_64.AppImage android.apk; do
+            test -f "release/Vita3K-Plus-Zar-${tag}-$f" || { echo "missing $f" >&2; exit 1; }
+          done
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Vita3K-Plus-Zar ${{ github.ref_name }}
+          files: release/*
+          generate_release_notes: true
+
   create-release:
     needs: [desktop-build, android-build]
     runs-on: ubuntu-latest
